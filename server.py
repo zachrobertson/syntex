@@ -4,16 +4,24 @@ import os
 import site
 import struct
 import numpy as np
+import json
+import time
+from pathlib import Path
+from typing import List, Dict, Any
+import tempfile
 
 from dotenv import load_dotenv
-from pydantic import BaseModel
-from typing import List, Optional
 from sqlalchemy import text, event
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends
-from sqlmodel import SQLModel, Field, Session, create_engine, select
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Body
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import FileResponse
+from sqlmodel import SQLModel, Session, create_engine, select
 
-from providers.openai import OpenAIModel
+from rag import search, rag
+from providers.openai import OpenAIModel, ModelProvider
+from models import Documents, PyRag, SearchQuery, VectorItem, ChatMessage, ChatSession
 
 # Create SQLModel engine
 engine = None
@@ -70,96 +78,100 @@ async def lifespan(app: FastAPI):
         embedding_model="text-embedding-3-small"
     )
     
+    # Set server start time
+    app.state.server_start_time = int(time.time())
+    
     yield
     # Cleanup
     engine.dispose()
 
 app = FastAPI(lifespan=lifespan)
 
+# Mount static files and templates
+app.mount("/static", StaticFiles(directory="templates/static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
 # Dependency to get database session
 def get_session():
     with Session(engine) as session:
         yield session
 
-# SQL model for documents table
-class Documents(SQLModel, table=True):
-    id: int | None = Field(default=None, primary_key=True)
-    document_id: str = Field(unique=True)
-    content: str
-    created_at: int | None = Field(default=None, index=True)
 
 def create_vector_table(session: Session):
     """Create the virtual table for vector items"""
     session.exec(text(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(embedding float[{embedding_dim}])"))
     session.commit()
 
-# Pydantic CLI model
-class PyRag(BaseModel):
-    database: str
-    host: str
-    port: int
-    clean: bool = False
 
-# Pydantic models for request/response
-class Document(BaseModel):
-    id: str
-    content: str
-
-class ChatMessage(BaseModel):
-    message: str
-    context: Optional[List[str]] = None
-
-class ChatResponse(BaseModel):
-    response: str
-    sources: Optional[List[str]] = None
-
-class SearchQuery(BaseModel):
-    query_embedding: List[float]
-    top_k: int = 5
-
-class SearchResult(BaseModel):
-    id: str
-    content: str
-    similarity: float
-
-class VectorItem(BaseModel):
-    rowid: int
-    document_id: str
-    content: str
-    vector: List[float]
+@app.get("/")
+async def read_root():
+    return FileResponse("templates/index.html")
 
 @app.post("/add-document")
 async def add_document(
-    document: Document,
+    files: list[UploadFile] = File(...),
     session: Session = Depends(get_session),
-    model: OpenAIModel = Depends(get_model)
+    model: ModelProvider = Depends(get_model)
 ):
     """
-    Add a new document to the database
+    Add new documents to the database
     """
     try:
-        # Add document to Documents table
-        db_document = Documents(
-            document_id=document.id,
-            content=document.content
-        )
-        session.add(db_document)
-        session.commit()  # Commit to get the auto-generated ID
-        
-        # Generate embedding using the model
-        embedding = model.embed(document.content)
-        
-        # Convert the embedding to bytes for storage
-        embedding_bytes = struct.pack("%sf" % len(embedding), *embedding)
-        session.exec(
-            text("INSERT INTO vec_items(rowid, embedding) VALUES (:id, :embedding)").bindparams(
-                id=db_document.id,  # Use the auto-generated integer ID
-                embedding=embedding_bytes
+        results = []
+        for file in files:
+            # Read file content
+            content = await file.read()
+            content = content.decode('utf-8')
+            
+            # Add document to Documents table
+            db_document = Documents(
+                document_id=file.filename,
+                content=content
             )
-        )
+            session.add(db_document)
+            session.commit()  # Commit to get the auto-generated ID
+            
+            # Generate embedding using the model
+            embedding = model.embed(content)
+            
+            # Convert the embedding to bytes for storage
+            embedding_bytes = struct.pack("%sf" % len(embedding), *embedding)
+            session.exec(
+                text("INSERT INTO vec_items(rowid, embedding) VALUES (:id, :embedding)").bindparams(
+                    id=db_document.id,  # Use the auto-generated integer ID
+                    embedding=embedding_bytes
+                )
+            )
+            
+            session.commit()
+            results.append({"status": "success", "message": f"Document {file.filename} added successfully"})
         
-        session.commit()
-        return {"status": "success", "message": f"Document {document.id} added successfully"}
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/get-document/{doc_id}")
+async def get_document(
+    doc_id: str,
+    session: Session = Depends(get_session)
+):
+    """
+    Get a document's content by its ID
+    """
+    try:
+        # Query the document by document_id
+        statement = select(Documents).where(Documents.document_id == doc_id)
+        document = session.exec(statement).first()
+        
+        if not document:
+            raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
+            
+        return {
+            "id": document.document_id,
+            "content": document.content
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -188,19 +200,42 @@ async def list_documents(
     session: Session = Depends(get_session)
 ):
     """
-    List all documents in the database
+    List all documents in the database with directory structure
     """
     try:
         statement = select(Documents)
         documents = session.exec(statement).all()
-        return {"documents": [
-            {
-                "id": doc.document_id,
-                "content": doc.content,
-                "created_at": doc.created_at
-            }
-            for doc in documents
-        ]}
+        
+        # Organize documents by directory structure
+        doc_tree = {}
+        for doc in documents:
+            path_parts = doc.path.split('/') if doc.path else []
+            current_level = doc_tree
+            
+            # Build the tree structure
+            for part in path_parts[:-1]:
+                if part not in current_level:
+                    current_level[part] = {}
+                current_level = current_level[part]
+            
+            # Add the document to the current level
+            if path_parts:
+                current_level[path_parts[-1]] = {
+                    "id": doc.document_id,
+                    "content": doc.content,
+                    "created_at": doc.created_at,
+                    "is_file": True
+                }
+            else:
+                # Root level document
+                doc_tree[doc.document_id] = {
+                    "id": doc.document_id,
+                    "content": doc.content,
+                    "created_at": doc.created_at,
+                    "is_file": True
+                }
+        
+        return {"documents": doc_tree}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -238,9 +273,94 @@ async def list_vectors(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/chat-session")
+async def create_chat_session(
+    name: str = Body(..., embed=True),
+    session: Session = Depends(get_session)
+):
+    """
+    Create a new chat session
+    """
+    try:
+        chat_session = ChatSession(
+            name=name,
+            created_at=int(time.time()),
+            updated_at=int(time.time())
+        )
+        session.add(chat_session)
+        session.commit()
+        return {"id": chat_session.id, "name": chat_session.name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/chat-sessions")
+async def list_chat_sessions(
+    session: Session = Depends(get_session)
+):
+    """
+    List all chat sessions
+    """
+    try:
+        statement = select(ChatSession).order_by(ChatSession.updated_at.desc())
+        sessions = session.exec(statement).all()
+        return {
+            "sessions": [
+                {
+                    "id": sess.id,
+                    "name": sess.name,
+                    "created_at": sess.created_at,
+                    "updated_at": sess.updated_at
+                }
+                for sess in sessions
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/chat-session/{session_id}")
+async def get_chat_session(
+    session_id: int,
+    db_session: Session = Depends(get_session)
+):
+    """
+    Get a specific chat session with its messages
+    """
+    try:
+        # Get the session
+        chat_session = db_session.get(ChatSession, session_id)
+        if not chat_session:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+
+        # Get messages for this session
+        statement = select(ChatMessage).where(
+            ChatMessage.session_id == session_id
+        ).order_by(ChatMessage.created_at)
+        messages = db_session.exec(statement).all()
+
+        return {
+            "session": {
+                "id": chat_session.id,
+                "name": chat_session.name,
+                "created_at": chat_session.created_at,
+                "updated_at": chat_session.updated_at
+            },
+            "messages": [
+                {
+                    "role": msg.role,
+                    "content": msg.content,
+                    "context_ids": json.loads(msg.context_ids) if msg.context_ids else None,
+                    "created_at": msg.created_at
+                }
+                for msg in messages
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/chat")
 async def chat(
-    message: ChatMessage,
+    input: str = Body(..., embed=True),
+    session_id: int = Body(..., embed=True),
     session: Session = Depends(get_session),
     model: OpenAIModel = Depends(get_model)
 ):
@@ -248,12 +368,63 @@ async def chat(
     Process a chat message and return a response
     """
     try:
-        # Generate response using the model
-        response = model.genText(message.message)
-        return ChatResponse(
-            response=response,
-            sources=message.context
+        # Verify session exists
+        chat_session = session.get(ChatSession, session_id)
+        if not chat_session:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+
+        # Save user message
+        user_message = ChatMessage(
+            session_id=session_id,
+            role="user",
+            content=input,
+            created_at=int(time.time())
         )
+        session.add(user_message)
+        session.commit()
+
+        # Get RAG response
+        response = rag(input, session, model)
+        
+        # Save assistant message
+        assistant_message = ChatMessage(
+            session_id=session_id,
+            role="assistant",
+            content=response.response,
+            context_ids=json.dumps(response.context) if response.context else None,
+            created_at=int(time.time())
+        )
+        session.add(assistant_message)
+        
+        # Update session timestamp
+        chat_session.updated_at = int(time.time())
+        session.commit()
+
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/chat-history")
+async def get_chat_history(
+    session: Session = Depends(get_session)
+):
+    """
+    Get the chat history
+    """
+    try:
+        statement = select(ChatMessage).order_by(ChatMessage.created_at)
+        messages = session.exec(statement).all()
+        return {
+            "messages": [
+                {
+                    "role": msg.role,
+                    "content": msg.content,
+                    "context_ids": json.loads(msg.context_ids) if msg.context_ids else None,
+                    "created_at": msg.created_at
+                }
+                for msg in messages
+            ]
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -266,34 +437,134 @@ async def search_documents(
     Search for similar documents using vector similarity
     """
     try:
-        # Serialize query embedding
-        query_bytes = struct.pack("%sf" % len(query.query_embedding), *query.query_embedding)
-        
-        # Perform vector similarity search
-        stmt = text("""
-            SELECT 
-                d.document_id,
-                d.content,
-                v.distance
-            FROM vec_items v
-            JOIN documents d ON d.id = v.rowid
-            WHERE v.embedding MATCH :query
-            ORDER BY v.distance
-            LIMIT :k
-        """)
-        
-        results = session.exec(stmt, params={"query": query_bytes, "k": query.top_k}).fetchall()
-        
-        return [
-            SearchResult(
-                id=str(row[0]),
-                content=row[1],
-                similarity=1.0 - float(row[2])  # Convert distance to similarity
-            )
-            for row in results
-        ]
+        return search(query, session)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+def is_valid_text_file(file_path: str) -> bool:
+    """Check if a file is a valid text file based on extension."""
+    valid_extensions = {'.txt', '.py', '.js', '.html', '.css', '.md', '.json', 
+                       '.xml', '.yaml', '.yml', '.java', '.cpp', '.c', '.h', 
+                       '.hpp', '.cs', '.go', '.rb', '.php', '.ts', '.tsx', '.jsx'}
+    return Path(file_path).suffix.lower() in valid_extensions
+
+async def process_directory(directory: Path, base_path: Path, session: Session, model: ModelProvider) -> List[Dict[str, Any]]:
+    """Process a directory recursively and add all valid text files to the database."""
+    results = []
+    file_count = 0
+    max_files = 1000  # Limit total number of files
+    
+    for item in directory.rglob('*'):
+        if file_count >= max_files:
+            results.append({"status": "warning", "message": f"Reached maximum file limit of {max_files}"})
+            break
+            
+        if item.is_file() and is_valid_text_file(str(item)):
+            try:
+                # Calculate relative path
+                rel_path = str(item.relative_to(base_path))
+                
+                # Read file content
+                with open(item, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Add document to Documents table
+                db_document = Documents(
+                    document_id=str(item.name),
+                    content=content,
+                    path=rel_path
+                )
+                session.add(db_document)
+                session.commit()
+                
+                # Generate embedding
+                embedding = model.embed(content)
+                embedding_bytes = struct.pack("%sf" % len(embedding), *embedding)
+                session.exec(
+                    text("INSERT INTO vec_items(rowid, embedding) VALUES (:id, :embedding)").bindparams(
+                        id=db_document.id,
+                        embedding=embedding_bytes
+                    )
+                )
+                
+                session.commit()
+                results.append({"status": "success", "message": f"Added {rel_path}"})
+                file_count += 1
+                
+            except Exception as e:
+                results.append({"status": "error", "message": f"Error processing {item}: {str(e)}"})
+    
+    return results
+
+@app.post("/add-directory")
+async def add_directory(
+    files: list[UploadFile] = File(...),
+    session: Session = Depends(get_session),
+    model: ModelProvider = Depends(get_model)
+):
+    """
+    Add all valid text files from a directory to the database
+    """
+    try:
+        results = []
+        file_count = 0
+        max_files = 1000  # Limit total number of files
+        
+        for file in files:
+            if file_count >= max_files:
+                results.append({"status": "warning", "message": f"Reached maximum file limit of {max_files}"})
+                break
+                
+            if is_valid_text_file(file.filename):
+                try:
+                    # Read file content
+                    content = await file.read()
+                    content = content.decode('utf-8')
+                    
+                    # Get the relative path from webkitRelativePath
+                    rel_path = file.filename
+                    if hasattr(file, 'webkitRelativePath'):
+                        rel_path = file.webkitRelativePath
+                    
+                    # Add document to Documents table
+                    db_document = Documents(
+                        document_id=file.filename,
+                        content=content,
+                        path=rel_path
+                    )
+                    session.add(db_document)
+                    session.commit()
+                    
+                    # Generate embedding
+                    embedding = model.embed(content)
+                    embedding_bytes = struct.pack("%sf" % len(embedding), *embedding)
+                    session.exec(
+                        text("INSERT INTO vec_items(rowid, embedding) VALUES (:id, :embedding)").bindparams(
+                            id=db_document.id,
+                            embedding=embedding_bytes
+                        )
+                    )
+                    
+                    session.commit()
+                    results.append({"status": "success", "message": f"Added {rel_path}"})
+                    file_count += 1
+                    
+                except Exception as e:
+                    results.append({"status": "error", "message": f"Error processing {file.filename}: {str(e)}"})
+        
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/server-status")
+async def get_server_status():
+    """
+    Get server status including start time
+    """
+    return {
+        "start_time": app.state.server_start_time,
+        "clean_mode": app.state.clean_database
+    }
 
 def main(args: PyRag):
     # Load environment variables
