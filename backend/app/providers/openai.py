@@ -1,7 +1,8 @@
 import os
 import openai
+import asyncio
+from typing import List, Optional
 
-from typing import Optional
 from providers.provider import ModelProvider
 
 class OpenAIModel(ModelProvider):
@@ -23,17 +24,17 @@ class OpenAIModel(ModelProvider):
             raise ValueError(f"Model is not a valid OpenAI model: {text_model}, valid models are: {self.models}")
         if embedding_model not in self.embedding_models:
             raise ValueError(f"Model is not a valid OpenAI embedding model: {embedding_model}, valid models are: {self.embedding_models}")
-        super().__init__(f"openai-text:{text_model}-embed:{embedding_model}")
+        super().__init__(text_model, embedding_model)
         
         self.text_model = text_model
         self.embedding_model = embedding_model
-        self.client = openai.OpenAI(
+        self.client = openai.AsyncOpenAI(
             api_key=api_key or os.getenv("OPENAI_API_KEY")
         )
         if not self.client.api_key:
             raise ValueError("OpenAI API key is required. Set it via OPENAI_API_KEY environment variable or pass it directly.")
 
-    def genText(self, prompt: str) -> str:
+    async def genText(self, prompt: str) -> str:
         """
         Run text generation with the OpenAI model.
         
@@ -47,7 +48,7 @@ class OpenAIModel(ModelProvider):
             openai.OpenAIError: If there's an error with the OpenAI API
         """
         try:
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=self.text_model,
                 messages=[
                     {"role": "user", "content": prompt}
@@ -59,7 +60,7 @@ class OpenAIModel(ModelProvider):
         except openai.OpenAIError as e:
             raise Exception(f"OpenAI API error: {str(e)}")
         
-    def embed(self, document: str) -> list[float]:
+    async def embed(self, document: str) -> List[float]:
         """
         Generate embeddings for the given document using OpenAI's embedding model.
         
@@ -67,13 +68,13 @@ class OpenAIModel(ModelProvider):
             document: The text to embed
             
         Returns:
-            list[float]: The embedding vector
+            List[float]: The embedding vector
             
         Raises:
             Exception: If there's an error with the OpenAI API
         """
         try:
-            response = self.client.embeddings.create(
+            response = await self.client.embeddings.create(
                 model=self.embedding_model,
                 input=document
             )
@@ -81,7 +82,7 @@ class OpenAIModel(ModelProvider):
         except Exception as e:
             raise Exception(f"OpenAI embedding error: {str(e)}")
 
-    def checkHealth(self) -> bool:
+    async def checkHealth(self) -> bool:
         """
         Check if the OpenAI API is healthy and available.
         
@@ -89,8 +90,11 @@ class OpenAIModel(ModelProvider):
             bool: True if the API is healthy, False otherwise
         """
         try:
-            # Make a simple request to check API health
-            self.client.models.list()
+            await asyncio.gather(
+                self.genText("Test of the text generation endpoint"),
+                self.embed("Test of the embedding endpoint")
+            )
             return True
-        except Exception:
+        except Exception as e:
+            print(f"Health check failed: {str(e)}")
             return False

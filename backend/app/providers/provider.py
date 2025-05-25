@@ -1,16 +1,19 @@
 from abc import ABC
+from typing import Coroutine, Any, List
 
 class ModelProvider(ABC):
-    def __init__(self, model_name: str):
+    def __init__(self, text_generation_model: str, embedding_model: str):
         """
         Initialize the model provider.
         
         Args:
-            model_name: The name of the model to use
+            text_generation_model: The name of the text generation model to use
+            embedding_model: The name of the embedding model to use
         """
-        self.model_name = model_name
+        self.text_model = text_generation_model
+        self.embedding_model = embedding_model
     
-    def genText(self, prompt: str) -> str:
+    async def genText(self, prompt: str) -> str:
         """
         Run text generation with the model.
         
@@ -22,7 +25,7 @@ class ModelProvider(ABC):
         """
         raise NotImplementedError("Subclasses must implement genText method")
     
-    def embed(self, document: str) -> list[float]:
+    async def embed(self, document: str) -> List[float]:
         """
         Generate an embedding from the provided document.
 
@@ -34,7 +37,7 @@ class ModelProvider(ABC):
         """
         raise NotImplementedError("Subclasses must implement embed method")
     
-    def checkHealth(self) -> bool:
+    async def checkHealth(self) -> bool:
         """
         Check if the model provider is healthy and available.
         

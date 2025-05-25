@@ -1,0 +1,54 @@
+{
+    "configurations": [
+        {
+            "name": "Frontend Debug",
+            "type": "chrome",
+            "request": "launch",
+            "url": "http://localhost:5173",
+            "webRoot": "${workspaceFolder}/frontend",
+            "sourceMapPathOverrides": {
+                "webpack:///src/*": "${webRoot}/src/*"
+            },
+            "preLaunchTask": "npm: dev - frontend",
+            "cwd": "${workspaceFolder}/frontend",
+            "postDebugTask": "Terminate All Tasks"
+        },
+        {
+            "name": "Backend Debug - Replicate",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/backend/app/server.py",
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "args": [
+                "--provider",
+                "replicate",
+                "--replicate-config",
+                "${workspaceFolder}/backend/models.replicate.json"
+            ]
+        },
+        {
+            "name": "Backend Debug - OpenAI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/backend/app/server.py",
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "args": [
+                "--provider",
+                "openai",
+                "--text-model",
+                "gpt-4o",
+                "--embedding-model",
+                "text-embedding-3-small",
+                "--clean"
+            ]
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Full Stack Debug",
+            "configurations": ["Frontend Debug", "Backend Debug - OpenAI"]
+        }
+    ]
+}
