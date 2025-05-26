@@ -1,0 +1,129 @@
+{
+    "text": {
+        "model": "google-deepmind/gemma-2b-it",
+        "version": "dff94eaf770e1fc211e425a50b51baa8e4cac6c39ef074681f9e39d778773626",
+        "input": {
+            "type": "object",
+            "title": "Input",
+            "properties": {
+                "top_k": {
+                    "type": "integer",
+                    "title": "Top K",
+                    "default": 50,
+                    "x-order": 5,
+                    "description": "When decoding text, samples from the top k most likely tokens; lower to ignore less likely tokens"
+                },
+                "top_p": {
+                    "type": "number",
+                    "title": "Top P",
+                    "default": 0.95,
+                    "maximum": 1,
+                    "minimum": 0,
+                    "x-order": 4,
+                    "description": "When decoding text, samples from the top p percentage of most likely tokens; lower to ignore less likely tokens"
+                },
+                "prompt": {
+                    "type": "string",
+                    "title": "Prompt",
+                    "default": "Write me a poem about Machine Learning.",
+                    "x-order": 0,
+                    "description": "Prompt to send to the model."
+                },
+                "temperature": {
+                    "type": "number",
+                    "title": "Temperature",
+                    "default": 0.7,
+                    "maximum": 5,
+                    "minimum": 0.01,
+                    "x-order": 3,
+                    "description": "Adjusts randomness of outputs, greater than 1 is random and 0 is deterministic, 0.75 is a good starting value."
+                },
+                "max_new_tokens": {
+                    "type": "integer",
+                    "title": "Max New Tokens",
+                    "default": 200,
+                    "minimum": 1,
+                    "x-order": 1,
+                    "description": "Maximum number of tokens to generate. A word is generally 2-3 tokens"
+                },
+                "min_new_tokens": {
+                    "type": "integer",
+                    "title": "Min New Tokens",
+                    "default": -1,
+                    "minimum": -1,
+                    "x-order": 2,
+                    "description": "Minimum number of tokens to generate. To disable, set to -1. A word is generally 2-3 tokens."
+                },
+                "repetition_penalty": {
+                    "type": "number",
+                    "title": "Repetition Penalty",
+                    "default": 1.15,
+                    "minimum": 0,
+                    "x-order": 6,
+                    "description": "A parameter that controls how repetitive text can be. Lower means more repetitive, while higher means less repetitive. Set to 1.0 to disable."
+                }
+            }
+        },
+        "output": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "title": "Output",
+            "x-cog-array-type": "iterator",
+            "x-cog-array-display": "concatenate"
+        },
+        "healthCheck": {
+            "input": {
+                "prompt": "Respond with anything"
+            }
+        }
+    },
+    "embedding": {
+        "model": "daanelson/imagebind",
+        "version": "0383f62e173dc821ec52663ed22a076d9c970549c209666ac3db181618b7a304",
+        "input": {
+            "type": "object",
+            "title": "Input",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "title": "Input",
+                    "format": "uri",
+                    "x-order": 0,
+                    "description": "file that you want to embed. Needs to be text, vision, or audio."
+                },
+                "modality": {
+                    "enum": [
+                        "text",
+                        "vision",
+                        "audio"
+                    ],
+                    "type": "string",
+                    "title": "modality",
+                    "description": "modality of the input you'd like to embed",
+                    "default": "vision",
+                    "x-order": 2
+                },
+                "text_input": {
+                    "type": "string",
+                    "title": "Text Input",
+                    "x-order": 1,
+                    "description": "text that you want to embed. Provide a string here instead of a text file to input if you'd like."
+                }
+            }
+        },
+        "output": {
+            "type": "array",
+            "items": {
+                "type": "number"
+            },
+            "title": "Output"
+        },
+        "healthCheck": {
+            "input": {
+                "text_input": "Respond with anything"
+            }
+        }
+    }
+}
